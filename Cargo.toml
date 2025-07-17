@@ -1,7 +1,10 @@
 [package]
 name = "git-remote-codecommit"
+description = "Unofficial AWS CodeCommit Git credential helper in Rust"
 version = "1.0.0"
+license = "Apache-2.0"
 edition = "2021"
+repository = "https://github.com/bartleboeuf/git-remote-codecommit"
 
 [dependencies]
 aws-config = { version = "1.8.2", features = ["behavior-version-latest"] }

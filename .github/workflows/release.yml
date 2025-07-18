@@ -84,19 +84,10 @@ jobs:
           tag: ${{ github.ref_name }}
           run: ${{ github.run_number }}
         run: |
-          if [[ "${{ github.event.inputs.pre-release }}" == "false" ]]; then
-            RELEASE_TYPE_NAME=Release
-            PRERELEASE_ARG=
-          else
-            RELEASE_TYPE_NAME=Pre-Release
-            PRERELEASE_ARG=--prerelease
-          fi
-          
           today=$(date '+%Y-%m-%d')
           gh release create "$today-$tag-$run" \
               --repo="$GITHUB_REPOSITORY" \
-              --title="git-remote-codecommit $RELEASE_TYPE_NAME $today-$tag #$run" \
+              --title="git-remote-codecommit Release $today-$tag #$run" \
               --target="$tag" \
               --generate-notes \
-              $PRERELEASE_ARG \
               bin/git-remote-codecommit-*

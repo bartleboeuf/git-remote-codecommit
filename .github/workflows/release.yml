@@ -83,11 +83,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ github.ref_name }}
           run: ${{ github.run_number }}
+          sha: ${{ github.sha }}
         run: |
           today=$(date '+%Y-%m-%d')
           gh release create "$today-$tag-$run" \
               --repo="$GITHUB_REPOSITORY" \
               --title="git-remote-codecommit Release $today-$tag #$run" \
-              --target="$tag" \
+              --target="$sha" \
               --generate-notes \
               bin/git-remote-codecommit-*

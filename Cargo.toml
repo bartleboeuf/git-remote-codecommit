@@ -3,20 +3,27 @@ name = "git-remote-codecommit"
 description = "Unofficial AWS CodeCommit Git credential helper in Rust"
 version = "1.0.0"
 license = "Apache-2.0"
-edition = "2021"
+readme = "README.md"
+edition = "2024"
+homepage = "https://github.com/bartleboeuf/git-remote-codecommit"
 repository = "https://github.com/bartleboeuf/git-remote-codecommit"
+authors = ["Bart LEBOEUF"]
+keywords = ["git", "aws", "codecommit", "git-remote-helper", "aws-sdk"]
+categories = ["development-tools", "command-line-utilities"]
+rust-version = "1.85.0"  # Specify minimum Rust version
+exclude = ["tests/", "benches/", "examples/", ".github/"]
 
 [dependencies]
 aws-config = { version = "1.8.2", features = ["behavior-version-latest"] }
-aws-credential-types = "1.2.4"
-aws-types = "1.3.7"
-chrono = "0.4.41"
+aws-credential-types = { version = "1.2.4", default-features = false }
+aws-types = { version = "1.3.7", default-features = false }
+chrono = { version = "0.4.41", default-features = false, features = ["clock", "std"] }
 hmac = "0.12.1"
 sha2 = "0.10.9"
 hex = "0.4.3"
 url = "2.5.4"
 urlencoding = "2.1.3"
-tokio = { version = "1.46.1", features = ["full"] }
+tokio = { version = "1.46.1", features = ["rt", "macros", "process"], default-features = false }
 
 [profile.release]
 lto = true
@@ -28,9 +35,17 @@ debug = false
 overflow-checks = false
 incremental = false
 
-# Add this section for better dependency optimization
+# Optimize dependencies for release builds
 [profile.release.package."*"]
 opt-level = 3
+debug = false
+
+# Development profile optimizations
+[profile.dev]
+opt-level = 0
+debug = true
+overflow-checks = true
+incremental = true
 
 # Used only on Windows to build the vcpkg dependencies
 [package.metadata.vcpkg]
@@ -41,3 +56,13 @@ rev = "2024.02.14"
 
 [package.metadata.vcpkg.target]
 x86_64-pc-windows-msvc = { triplet = "x64-windows-static-md", dev-dependencies = ["openssl" ] }
+
+[[bin]]
+name = "git-remote-codecommit"
+path = "src/main.rs"
+
+# Add feature flags for optional functionality
+[features]
+default = []
+# Enable faster crypto (requires additional system dependencies)
+fast-crypto = ["sha2/asm"]

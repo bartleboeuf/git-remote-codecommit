@@ -114,7 +114,7 @@ jobs:
             ARCHIVE_FILE="${ARCHIVE_NAME}.zip"
             echo "Creating archive: ${ARCHIVE_FILE}"
             cd target/${{ matrix.target }}/release
-            7z a "${ARCHIVE_FILE}" "${BINARY_NAME}${{ matrix.ext }}"
+            7z a "../../../${ARCHIVE_FILE}" "${BINARY_NAME}${{ matrix.ext }}"
           else
             ls -ail target/${{ matrix.target }}/release
             echo "Creating non-Windows archive"

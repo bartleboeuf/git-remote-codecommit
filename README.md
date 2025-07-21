@@ -13,19 +13,23 @@ This Git remote helper enables pushing and pulling from AWS CodeCommit repositor
 
 ## Features
 
-- Support for AWS CodeCommit repositories
-- Automatic AWS credentials management
-- Support for AWS profiles
-- Cross-platform compatibility
-- Statically linked binary (no runtime dependencies)
-- Smaller footprint compared to the Python implementation
+- Support for AWS CodeCommit repositories over HTTPS
+- Automatic AWS credentials management from environment or credentials file
+- Support for AWS profiles and regions
+- Cross-platform support (Windows, Linux, and macOS)
+- Multi-architecture support (x86_64 and arm64)
+- Native performance with Rust implementation
+- Self-contained dynamically linked binary
 
 ## Prerequisites
 
 - Git (2.0 or newer)
 - AWS credentials configured (`~/.aws/credentials` or environment variables)
-- Docker (for building without Rust installation)
-- Linux, macOS, or Windows
+- Docker (for Linux/macOS builds) or Visual Studio Build Tools (for Windows)
+- One of:
+  - Windows 10/11 with Visual Studio Build Tools
+  - Linux (x86_64 or arm64)
+  - macOS (Intel or Apple Silicon)
 
 ## Installation
 
@@ -119,10 +123,10 @@ git remote add origin codecommit::eu-west-1://staging@my-repo
 ## Differences from Official Implementation
 
 - Written in Rust instead of Python
-- Smaller binary size
-- No Python runtime dependency
+- Self-contained binary (no external dependencies)
+- No Python runtime requirement
 - Improved error handling
-- Static linking (more portable)
+- Native performance
 
 ## Contributing
 

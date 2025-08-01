@@ -86,8 +86,13 @@ jobs:
             ${{ runner.os }}-cargo-${{ matrix.target }}-
             ${{ runner.os }}-cargo-
 
-      - name: Build binary
+      - name: Build binary (Linux, macOS)
+        if: matrix.target != 'x86_64-pc-windows-msvc'
         run: cargo build --release --target ${{ matrix.target }} --features fast-crypto
+
+      - name: Build binary (Windows)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Get binary name
         id: binary_name

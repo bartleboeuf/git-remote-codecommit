@@ -37,9 +37,11 @@ docker run --rm \
     -w /workspace \
     ${IMAGE} \
     bash -c "rustup target add ${TARGET} && \
-             cargo clean && \
-             cargo build --release --target ${TARGET}"
-
+             cargo update && \
+             rustup component add clippy && \
+             cargo clippy --all-targets --all-features -- -D warnings && \
+             cargo build --release --target ${TARGET} --features fast-crypto"
+# cargo clean && \
 echo "Optimized binary at: target/${TARGET}/release/git-remote-codecommit"
 
 # Set executable permissions

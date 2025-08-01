@@ -14,7 +14,7 @@ rust-version = "1.85.0"  # Specify minimum Rust version
 exclude = ["tests/", "benches/", "examples/", ".github/"]
 
 [dependencies]
-aws-config = { version = "1.8.2", features = ["behavior-version-latest"] }
+aws-config = { version = "1.8.3", features = ["behavior-version-latest"] }
 aws-credential-types = { version = "1.2.4", default-features = false }
 aws-types = { version = "1.3.7", default-features = false }
 chrono = { version = "0.4.41", default-features = false, features = ["clock", "std"] }
@@ -23,7 +23,7 @@ sha2 = "0.10.9"
 hex = "0.4.3"
 url = "2.5.4"
 urlencoding = "2.1.3"
-tokio = { version = "1.46.1", features = ["rt", "macros", "process"], default-features = false }
+tokio = { version = "1.47.0", features = ["rt", "macros", "process", "time"], default-features = false }
 
 [profile.release]
 lto = true
@@ -46,6 +46,11 @@ opt-level = 0
 debug = true
 overflow-checks = true
 incremental = true
+
+# Speed up dev builds by reducing optimization on deps
+[profile.dev.package."*"]
+opt-level = 1
+debug = false
 
 # Used only on Windows to build the vcpkg dependencies
 [package.metadata.vcpkg]

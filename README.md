@@ -1,7 +1,7 @@
 # git-remote-codecommit
 
-[![Crates.io](https://img.shields.io/crates/v/git-remote-codecommit.svg)](https://crates.io/crates/git-remote-codecommit)
-[![Build Status](https://github.com/bartleboeuf/git-remote-codecommit/workflows/CI/badge.svg)](https://github.com/bartleboeuf/git-remote-codecommit/actions)
+[![Release](https://github.com/bartleboeuf/git-remote-codecommit/actions/workflows/release.yml/badge.svg)](https://github.com/bartleboeuf/git-remote-codecommit/actions/workflows/release.yml)
+[![License](https://img.shields.io/badge/license-Apache-blue.svg)](LICENSE)
 
 A Rust implementation of the AWS CodeCommit remote helper for Git. This project aims to provide a maintained alternative to the [official Python implementation](https://github.com/aws/git-remote-codecommit).
 

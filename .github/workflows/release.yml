@@ -87,7 +87,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} --features fast-crypto
 
       - name: Get binary name
         id: binary_name

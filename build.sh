@@ -2,7 +2,7 @@
 set -e
 
 PROJECT_DIR="$(pwd)"
-IMAGE="rust:1.88-slim"
+IMAGE="rust:1.93-slim"
 
 # Detect OS
 OS="$(uname -s)"

@@ -8,6 +8,7 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use std::env;
 use std::error::Error;
+use std::fmt::Write as _;
 use std::process::{Command, exit};
 use url::Url;
 
@@ -18,75 +19,141 @@ fn error_exit(msg: &str) {
     exit(1);
 }
 
+/// Supported AWS CodeCommit regions that `_is_region_available()` can validate.
+/// This list must remain sorted because `binary_search` relies on ordering.
 const KNOWN_REGIONS: &[&str] = &[
-    "af-south-1", "ap-east-1", "ap-northeast-1", "ap-northeast-2", "ap-northeast-3",
-    "ap-south-1", "ap-southeast-1", "ap-southeast-2", "ap-southeast-3", "ca-central-1",
-    "cn-north-1", "cn-northwest-1", "eu-central-1", "eu-north-1", "eu-south-1",
-    "eu-west-1", "eu-west-2", "eu-west-3", "il-central-1", "me-central-1",
-    "me-south-1", "sa-east-1", "us-east-1", "us-east-2", "us-gov-east-1",
-    "us-gov-west-1", "us-west-1", "us-west-2"
+    "af-south-1",
+    "ap-east-1",
+    "ap-northeast-1",
+    "ap-northeast-2",
+    "ap-northeast-3",
+    "ap-south-1",
+    "ap-south-2",
+    "ap-southeast-1",
+    "ap-southeast-2",
+    "ap-southeast-3",
+    "ca-central-1",
+    "cn-north-1",
+    "cn-northwest-1",
+    "eu-central-1",
+    "eu-north-1",
+    "eu-south-1",
+    "eu-west-1",
+    "eu-west-2",
+    "eu-west-3",
+    "eusc-de-east-1",
+    "il-central-1",
+    "me-central-1",
+    "me-south-1",
+    "sa-east-1",
+    "us-east-1",
+    "us-east-2",
+    "us-gov-east-1",
+    "us-gov-west-1",
+    "us-west-1",
+    "us-west-2",
 ];
 
 #[inline]
+/// Returns whether the helper can operate in `region`.
+/// The sorted slice enables a fast `binary_search` instead of a full linear scan.
 fn is_region_available(region: &str) -> bool {
-    KNOWN_REGIONS.contains(&region)
+    KNOWN_REGIONS.binary_search(&region).is_ok()
 }
 
 #[inline]
+/// Chooses the correct DNS suffix for the given region.
+/// Mainland China uses `.amazonaws.com.cn` while the European sovereign cloud uses `.amazonaws.eu`.
 fn website_domain_mapping(region: &str) -> &'static str {
     match region {
         "cn-north-1" | "cn-northwest-1" => "amazonaws.com.cn",
+        _ if region.starts_with("eusc-") => "amazonaws.eu",
         _ => "amazonaws.com",
     }
 }
 
-fn hash_sha256(input: &str) -> String {
+/// Returns the SHA256 digest of `input`.
+fn hash_sha256(input: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    // Pre-allocate with exact capacity (64 hex chars)
-    let mut result = String::with_capacity(64);
-    result.push_str(&format!("{:x}", hasher.finalize()));
-    result
+    hasher.update(input);
+    let digest = hasher.finalize();
+    let mut out = [0_u8; 32];
+    out.copy_from_slice(&digest);
+    out
 }
 
-fn hmac_sha256(key: &[u8], input: &str) -> Vec<u8> {
+/// Produces an HMAC-SHA256 using `key` and `input`, keeping the result on the stack.
+fn hmac_sha256(key: &[u8], input: &[u8]) -> [u8; 32] {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC can take key of any size");
-    mac.update(input.as_bytes());
-    mac.finalize().into_bytes().to_vec()
+    mac.update(input);
+    let digest = mac.finalize().into_bytes();
+    let mut out = [0_u8; 32];
+    out.copy_from_slice(&digest);
+    out
 }
 
+/// Builds the signed `username:password` fragment needed by `git remote-http`.
+/// It mirrors the AWS signing steps: canonical request, credential scope, and HMAC chaining.
 fn generate_signature(hostname: &str, path: &str, region: &str, creds: &Credentials) -> String {
     use chrono::Utc;
     let timestamp = Utc::now().format("%Y%m%dT%H%M%S").to_string();
+    let datestamp = &timestamp[..8];
 
-    let canonical_request = format!("GIT\n{path}\n\nhost:{hostname}\n\nhost\n");
-    let credential_scope = format!("{}/{}/codecommit/aws4_request", &timestamp[..8], region);
-    let string_to_sign = format!(
-        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
-        timestamp,
+    let mut canonical_request = String::with_capacity(path.len() + hostname.len() + 16);
+    canonical_request.push_str("GIT\n");
+    canonical_request.push_str(path);
+    canonical_request.push_str("\n\nhost:");
+    canonical_request.push_str(hostname);
+    canonical_request.push_str("\n\nhost\n");
+    let canonical_request_hash = hash_sha256(canonical_request.as_bytes());
+
+    let mut canonical_request_hash_hex = [0_u8; 64];
+    hex::encode_to_slice(canonical_request_hash, &mut canonical_request_hash_hex)
+        .expect("sha256 digest must encode to 64 hex chars");
+    let canonical_request_hash_hex = std::str::from_utf8(&canonical_request_hash_hex)
+        .expect("hex-encoded digest is valid UTF-8");
+
+    let mut credential_scope = String::with_capacity(32 + region.len());
+    let _ = write!(
         credential_scope,
-        hash_sha256(&canonical_request)
+        "{}/{}/codecommit/aws4_request",
+        datestamp, region
     );
 
-    let date_key = hmac_sha256(
-        format!("AWS4{}", creds.secret_access_key()).as_bytes(),
-        &timestamp[..8]
+    let mut string_to_sign = String::with_capacity(
+        32 + timestamp.len() + credential_scope.len() + canonical_request_hash_hex.len(),
     );
-    let date_region_key = hmac_sha256(&date_key, region);
-    let date_region_service_key = hmac_sha256(&date_region_key, "codecommit");
-    let signing_key = hmac_sha256(&date_region_service_key, "aws4_request");
-    let signature = hex::encode(hmac_sha256(&signing_key, &string_to_sign));
+    string_to_sign.push_str("AWS4-HMAC-SHA256\n");
+    string_to_sign.push_str(&timestamp);
+    string_to_sign.push('\n');
+    string_to_sign.push_str(&credential_scope);
+    string_to_sign.push('\n');
+    string_to_sign.push_str(canonical_request_hash_hex);
+
+    let secret = creds.secret_access_key().as_bytes();
+    let mut aws4_secret = Vec::with_capacity(4 + secret.len());
+    aws4_secret.extend_from_slice(b"AWS4");
+    aws4_secret.extend_from_slice(secret);
+
+    let date_key = hmac_sha256(&aws4_secret, datestamp.as_bytes());
+    let date_region_key = hmac_sha256(&date_key, region.as_bytes());
+    let date_region_service_key = hmac_sha256(&date_region_key, b"codecommit");
+    let signing_key = hmac_sha256(&date_region_service_key, b"aws4_request");
+    let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
 
     format!("{timestamp}Z{signature}")
 }
 
+/// Constructs the HTTPS URL that contains credentials recognized by `git remote-http`.
+/// The placeholder `CODE_COMMIT_ENDPOINT` env var allows overriding the AWS endpoint for testing.
 fn build_git_url(repository: &str, region: &str, creds: &Credentials) -> String {
-    let hostname = env::var("CODE_COMMIT_ENDPOINT").unwrap_or_else(|_| 
+    let hostname = env::var("CODE_COMMIT_ENDPOINT").unwrap_or_else(|_| {
         format!(
             "git-codecommit.{}.{}",
             region,
             website_domain_mapping(region)
-        ));
+        )
+    });
 
     let path = format!("/v1/repos/{repository}");
     let username_raw = match creds.session_token() {
@@ -101,6 +168,11 @@ fn build_git_url(repository: &str, region: &str, creds: &Credentials) -> String 
 }
 
 #[tokio::main(flavor = "current_thread")]
+/// Entrypoint for the git credential helper.
+/// - Parses the `codecommit://` URL
+/// - Resolves AWS credentials
+/// - Builds the signed remote URL
+/// - Defers the actual git operation to `git remote-http`
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
@@ -123,24 +195,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let mut profile = "default".to_string();
-    let mut repository = url.host_str().unwrap_or("").to_string();
+    let repository = url.host_str().unwrap_or("").to_string();
     let region = url.scheme().to_string();
 
-    // Parse profile from URL - check User info first, then fallback to Host parsing
-    if let Some(user) = url.username().split('@').next() {
-        if !user.is_empty() {
-            profile = user.to_string();
-        }
-    } else if repository.contains('@') {
-        let parts: Vec<&str> = repository.splitn(2, '@').collect();
-        if parts.len() == 2 {
-            profile = parts[0].to_string();
-            repository = parts[1].to_string();
-        }
+    // Parse profile from URL user info
+    let user = url.username();
+    if !user.is_empty() {
+        profile = user.to_string();
     }
 
     if !is_region_available(&region) {
-        error_exit(&format!("The following AWS Region is not available for use with AWS CodeCommit: {region}."));
+        error_exit(&format!(
+            "The following AWS Region is not available for use with AWS CodeCommit: {region}."
+        ));
     }
 
     // Load AWS config
@@ -175,7 +242,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         • You haven't logged in with 'aws sso login'\n\
                         • Your temporary credentials have expired\n\
                         \n\
-                        Try running: aws sso login --profile {profile}")
+                        Try running: aws sso login --profile {profile}"
+                    )
                 } else if error_str.contains("UnauthorizedException") {
                     format!(
                         "AWS authentication failed: You don't have permission to access CodeCommit.\n\
@@ -183,15 +251,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Please check:\n\
                         • Your AWS credentials are configured correctly\n\
                         • Your user/role has CodeCommit permissions\n\
-                        • You're using the correct AWS profile ({profile})")
-                } else if error_str.contains("NoCredentialsError") || error_str.contains("CredentialsNotLoaded") {
+                        • You're using the correct AWS profile ({profile})"
+                    )
+                } else if error_str.contains("NoCredentialsError")
+                    || error_str.contains("CredentialsNotLoaded")
+                {
                     format!(
                         "AWS credentials not found.\n\
                         \n\
                         Please configure your AWS credentials using one of:\n\
                         • aws configure (for access keys)\n\
                         • aws sso login --profile {profile} (for SSO)\n\
-                        • Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables")
+                        • Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables"
+                    )
                 } else {
                     format!(
                         "Failed to load AWS credentials for profile '{profile}'.\n\
@@ -201,20 +273,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Try:\n\
                         • Check your AWS configuration: aws configure list --profile {profile}\n\
                         • Verify your profile exists: aws configure list-profiles\n\
-                        • Re-authenticate if using SSO: aws sso login --profile {profile}")
+                        • Re-authenticate if using SSO: aws sso login --profile {profile}"
+                    )
                 }
             } else {
                 format!(
                     "Failed to load AWS credentials for profile '{profile}'.\n\
                     \n\
-                    Please ensure your AWS credentials are properly configured.")
+                    Please ensure your AWS credentials are properly configured."
+                )
             };
 
             error_exit(&error_msg);
             unreachable!()
         }
     };
-
 
     let authenticated_url = build_git_url(&repository, &region, &credentials);
 

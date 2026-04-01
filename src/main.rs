@@ -8,13 +8,12 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use std::env;
 use std::error::Error;
-use std::fmt::Write as _;
 use std::process::{Command, exit};
 use url::Url;
 
 type HmacSha256 = Hmac<Sha256>;
 
-fn error_exit(msg: &str) {
+fn error_exit(msg: &str) -> ! {
     eprintln!("{msg}");
     exit(1);
 }
@@ -93,18 +92,26 @@ fn hmac_sha256(key: &[u8], input: &[u8]) -> [u8; 32] {
 }
 
 /// Builds the signed `username:password` fragment needed by `git remote-http`.
-/// It mirrors the AWS signing steps: canonical request, credential scope, and HMAC chaining.
+/// Implements AWS Signature Version 4 (AWS SigV4) signing process:
+/// 1. Create canonical request with GIT verb
+/// 2. Hash canonical request (SHA256)
+/// 3. Create string to sign with datestamp, region, service scope
+/// 4. Derive signing key using HMAC chain: AWS4 + secret → date → region → service → request
+/// 5. Sign the string to produce final signature
 fn generate_signature(hostname: &str, path: &str, region: &str, creds: &Credentials) -> String {
     use chrono::Utc;
     let timestamp = Utc::now().format("%Y%m%dT%H%M%S").to_string();
     let datestamp = &timestamp[..8];
 
+    // Step 1: Build canonical request (GIT verb for CodeCommit)
     let mut canonical_request = String::with_capacity(path.len() + hostname.len() + 16);
-    canonical_request.push_str("GIT\n");
+    canonical_request.push_str("GIT\n"); // HTTP verb for AWS CodeCommit signing
     canonical_request.push_str(path);
     canonical_request.push_str("\n\nhost:");
     canonical_request.push_str(hostname);
     canonical_request.push_str("\n\nhost\n");
+
+    // Step 2: Hash canonical request
     let canonical_request_hash = hash_sha256(canonical_request.as_bytes());
 
     let mut canonical_request_hash_hex = [0_u8; 64];
@@ -113,13 +120,10 @@ fn generate_signature(hostname: &str, path: &str, region: &str, creds: &Credenti
     let canonical_request_hash_hex = std::str::from_utf8(&canonical_request_hash_hex)
         .expect("hex-encoded digest is valid UTF-8");
 
-    let mut credential_scope = String::with_capacity(32 + region.len());
-    let _ = write!(
-        credential_scope,
-        "{}/{}/codecommit/aws4_request",
-        datestamp, region
-    );
+    // Step 3: Build credential scope for CodeCommit service
+    let credential_scope = format!("{}/{}/codecommit/aws4_request", datestamp, region);
 
+    // Step 4: Build string to sign (what we'll sign with the derived key)
     let mut string_to_sign = String::with_capacity(
         32 + timestamp.len() + credential_scope.len() + canonical_request_hash_hex.len(),
     );
@@ -130,15 +134,19 @@ fn generate_signature(hostname: &str, path: &str, region: &str, creds: &Credenti
     string_to_sign.push('\n');
     string_to_sign.push_str(canonical_request_hash_hex);
 
+    // Step 5: Derive signing key using HMAC chain
+    // This prevents key reuse across services, regions, and dates
     let secret = creds.secret_access_key().as_bytes();
     let mut aws4_secret = Vec::with_capacity(4 + secret.len());
-    aws4_secret.extend_from_slice(b"AWS4");
+    aws4_secret.extend_from_slice(b"AWS4"); // AWS4 prefix
     aws4_secret.extend_from_slice(secret);
 
-    let date_key = hmac_sha256(&aws4_secret, datestamp.as_bytes());
-    let date_region_key = hmac_sha256(&date_key, region.as_bytes());
-    let date_region_service_key = hmac_sha256(&date_region_key, b"codecommit");
-    let signing_key = hmac_sha256(&date_region_service_key, b"aws4_request");
+    let date_key = hmac_sha256(&aws4_secret, datestamp.as_bytes()); // HMAC with date
+    let date_region_key = hmac_sha256(&date_key, region.as_bytes()); // HMAC with region
+    let date_region_service_key = hmac_sha256(&date_region_key, b"codecommit"); // HMAC with service
+    let signing_key = hmac_sha256(&date_region_service_key, b"aws4_request"); // HMAC with request type
+
+    // Step 6: Sign the string to sign with derived key
     let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
 
     format!("{timestamp}Z{signature}")
@@ -188,27 +196,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let git_cmd = &args[1];
     let remote_url = &args[2];
 
-    // Parse remote_url
+    // Parse remote_url (format: codecommit://[profile@]repository or codecommit::region://[profile@]repository)
     let url = Url::parse(remote_url).unwrap_or_else(|_| {
-        error_exit(&format!("Malformed URL: {remote_url}. Must be codecommit://<repository> or codecommit::<region>://<repository>"));
-        unreachable!()
+        error_exit(&format!(
+            "Malformed URL: {remote_url}\n\
+            \n\
+            Expected format:\n\
+            • codecommit://repository\n\
+            • codecommit://profile@repository\n\
+            • codecommit::region://repository\n\
+            • codecommit::region://profile@repository\n\
+            \n\
+            Example: codecommit::us-east-1://myprofile@my-repo"
+        ))
     });
 
     let mut profile = "default".to_string();
-    let repository = url.host_str().unwrap_or("").to_string();
-    let region = url.scheme().to_string();
+    let repository = url
+        .host_str()
+        .filter(|h| !h.is_empty())
+        .map(|h| h.to_string())
+        .unwrap_or_else(|| {
+            error_exit(&format!(
+                "Invalid repository name in URL: {remote_url}\n\
+                \n\
+                Repository name cannot be empty.\n\
+                \n\
+                Examples:\n\
+                • codecommit://my-repo\n\
+                • codecommit://profile@my-repo\n\
+                • codecommit::us-east-1://my-repo"
+            ))
+        });
+    let scheme = url.scheme().to_string();
 
-    // Parse profile from URL user info
+    // Parse profile from URL user info (format: profile@repository)
     let user = url.username();
     if !user.is_empty() {
         profile = user.to_string();
     }
 
-    if !is_region_available(&region) {
+    // Determine region: if scheme is a valid region, use it; otherwise use default
+    let region = if is_region_available(&scheme) {
+        scheme
+    } else if scheme == "codecommit" {
+        // No explicit region specified; use fallback.
+        // AWS SDK's default resolution is checked later and can override this if configured.
+        "us-east-1".to_string()
+    } else {
         error_exit(&format!(
-            "The following AWS Region is not available for use with AWS CodeCommit: {region}."
-        ));
-    }
+            "The following AWS Region is not available for use with AWS CodeCommit: {scheme}.\n\
+            \n\
+            Available regions: af-south-1, ap-east-1, ap-northeast-1, ap-northeast-2, ap-northeast-3, \
+            ap-south-1, ap-south-2, ap-southeast-1, ap-southeast-2, ap-southeast-3, ca-central-1, \
+            cn-north-1, cn-northwest-1, eu-central-1, eu-north-1, eu-south-1, eu-west-1, eu-west-2, \
+            eu-west-3, eusc-de-east-1, il-central-1, me-central-1, me-south-1, sa-east-1, us-east-1, \
+            us-east-2, us-gov-east-1, us-gov-west-1, us-west-1, us-west-2"
+        ))
+    };
 
     // Load AWS config
     let mut config_builder =
@@ -221,11 +266,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = config_builder.load().await;
 
     // Get credentials from the config
-    let credential_result = config
-        .credentials_provider()
-        .expect("No credentials provider")
-        .provide_credentials()
-        .await;
+    let credentials_provider = config.credentials_provider().unwrap_or_else(|| {
+        error_exit(&format!(
+            "AWS credentials provider not available.\n\
+            \n\
+            Please ensure your AWS credentials are properly configured using one of:\n\
+            • aws configure (for access keys)\n\
+            • aws sso login --profile {} (for SSO)\n\
+            • Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables",
+            profile
+        ))
+    });
+
+    let credential_result = credentials_provider.provide_credentials().await;
 
     let credentials = match credential_result {
         Ok(creds) => creds,
@@ -242,7 +295,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         • You haven't logged in with 'aws sso login'\n\
                         • Your temporary credentials have expired\n\
                         \n\
-                        Try running: aws sso login --profile {profile}"
+                        Try running: aws sso login --profile {}",
+                        profile
                     )
                 } else if error_str.contains("UnauthorizedException") {
                     format!(
@@ -251,7 +305,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Please check:\n\
                         • Your AWS credentials are configured correctly\n\
                         • Your user/role has CodeCommit permissions\n\
-                        • You're using the correct AWS profile ({profile})"
+                        • You're using the correct AWS profile ({})",
+                        profile
                     )
                 } else if error_str.contains("NoCredentialsError")
                     || error_str.contains("CredentialsNotLoaded")
@@ -261,19 +316,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         \n\
                         Please configure your AWS credentials using one of:\n\
                         • aws configure (for access keys)\n\
-                        • aws sso login --profile {profile} (for SSO)\n\
-                        • Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables"
+                        • aws sso login --profile {} (for SSO)\n\
+                        • Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables",
+                        profile
                     )
                 } else {
                     format!(
-                        "Failed to load AWS credentials for profile '{profile}'.\n\
+                        "Failed to load AWS credentials for profile '{}'.\n\
                         \n\
-                        Error details: {error_str}\n\
+                        Error details: {}\n\
                         \n\
                         Try:\n\
-                        • Check your AWS configuration: aws configure list --profile {profile}\n\
+                        • Check your AWS configuration: aws configure list --profile {}\n\
                         • Verify your profile exists: aws configure list-profiles\n\
-                        • Re-authenticate if using SSO: aws sso login --profile {profile}"
+                        • Re-authenticate if using SSO: aws sso login --profile {}",
+                        profile, error_str, profile, profile
                     )
                 }
             } else {
@@ -284,8 +341,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             };
 
-            error_exit(&error_msg);
-            unreachable!()
+            error_exit(&error_msg)
         }
     };
 
@@ -297,7 +353,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(git_cmd)
         .arg(&authenticated_url)
         .status()
-        .expect("Failed to execute git remote-http");
+        .unwrap_or_else(|e| {
+            error_exit(&format!(
+                "Failed to execute git remote-http: {e}\n\
+                \n\
+                Please ensure:\n\
+                • Git is installed and in your PATH\n\
+                • You have permission to execute: git remote-http"
+            ))
+        });
 
     if !status.success() {
         exit(status.code().unwrap_or(1));

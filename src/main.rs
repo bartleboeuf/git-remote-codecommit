@@ -1,14 +1,14 @@
 #![forbid(unsafe_code)]
 
-use aws_config::BehaviorVersion;
+use aws_config::{BehaviorVersion, Region};
 use aws_credential_types::Credentials;
 use aws_credential_types::provider::ProvideCredentials;
-use aws_types::region::Region;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use std::env;
 use std::error::Error;
 use std::process::{Command, exit};
+use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -18,7 +18,7 @@ fn error_exit(msg: &str) -> ! {
     exit(1);
 }
 
-/// Supported AWS CodeCommit regions that `_is_region_available()` can validate.
+/// Supported AWS CodeCommit regions that `is_region_available()` can validate.
 /// This list must remain sorted because `binary_search` relies on ordering.
 const KNOWN_REGIONS: &[&str] = &[
     "af-south-1",
@@ -53,14 +53,12 @@ const KNOWN_REGIONS: &[&str] = &[
     "us-west-2",
 ];
 
-#[inline]
 /// Returns whether the helper can operate in `region`.
 /// The sorted slice enables a fast `binary_search` instead of a full linear scan.
 fn is_region_available(region: &str) -> bool {
     KNOWN_REGIONS.binary_search(&region).is_ok()
 }
 
-#[inline]
 /// Chooses the correct DNS suffix for the given region.
 /// Mainland China uses `.amazonaws.com.cn` while the European sovereign cloud uses `.amazonaws.eu`.
 fn website_domain_mapping(region: &str) -> &'static str {
@@ -69,6 +67,53 @@ fn website_domain_mapping(region: &str) -> &'static str {
         _ if region.starts_with("eusc-") => "amazonaws.eu",
         _ => "amazonaws.com",
     }
+}
+
+/// Formats `time` as the SigV4 timestamp `YYYYMMDDTHHMMSS` in UTC.
+/// Uses Howard Hinnant's `civil_from_days` algorithm to avoid a date-time dependency.
+fn amz_timestamp(time: SystemTime) -> String {
+    let secs = time
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is before 1970")
+        .as_secs() as i64;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+
+    format!(
+        "{y:04}{m:02}{d:02}T{:02}{:02}{:02}",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
+/// Lowercase hex encoding of `bytes`.
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Percent-encodes everything except RFC 3986 unreserved characters (matches urlencoding::encode).
+fn percent_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for b in input.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(char::from(b))
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// Returns the SHA256 digest of `input`.
@@ -99,8 +144,7 @@ fn hmac_sha256(key: &[u8], input: &[u8]) -> [u8; 32] {
 /// 4. Derive signing key using HMAC chain: AWS4 + secret → date → region → service → request
 /// 5. Sign the string to produce final signature
 fn generate_signature(hostname: &str, path: &str, region: &str, creds: &Credentials) -> String {
-    use chrono::Utc;
-    let timestamp = Utc::now().format("%Y%m%dT%H%M%S").to_string();
+    let timestamp = amz_timestamp(SystemTime::now());
     let datestamp = &timestamp[..8];
 
     // Step 1: Build canonical request (GIT verb for CodeCommit)
@@ -112,13 +156,7 @@ fn generate_signature(hostname: &str, path: &str, region: &str, creds: &Credenti
     canonical_request.push_str("\n\nhost\n");
 
     // Step 2: Hash canonical request
-    let canonical_request_hash = hash_sha256(canonical_request.as_bytes());
-
-    let mut canonical_request_hash_hex = [0_u8; 64];
-    hex::encode_to_slice(canonical_request_hash, &mut canonical_request_hash_hex)
-        .expect("sha256 digest must encode to 64 hex chars");
-    let canonical_request_hash_hex = std::str::from_utf8(&canonical_request_hash_hex)
-        .expect("hex-encoded digest is valid UTF-8");
+    let canonical_request_hash_hex = hex_encode(&hash_sha256(canonical_request.as_bytes()));
 
     // Step 3: Build credential scope for CodeCommit service
     let credential_scope = format!("{}/{}/codecommit/aws4_request", datestamp, region);
@@ -132,7 +170,7 @@ fn generate_signature(hostname: &str, path: &str, region: &str, creds: &Credenti
     string_to_sign.push('\n');
     string_to_sign.push_str(&credential_scope);
     string_to_sign.push('\n');
-    string_to_sign.push_str(canonical_request_hash_hex);
+    string_to_sign.push_str(&canonical_request_hash_hex);
 
     // Step 5: Derive signing key using HMAC chain
     // This prevents key reuse across services, regions, and dates
@@ -147,7 +185,7 @@ fn generate_signature(hostname: &str, path: &str, region: &str, creds: &Credenti
     let signing_key = hmac_sha256(&date_region_service_key, b"aws4_request"); // HMAC with request type
 
     // Step 6: Sign the string to sign with derived key
-    let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
+    let signature = hex_encode(&hmac_sha256(&signing_key, string_to_sign.as_bytes()));
 
     format!("{timestamp}Z{signature}")
 }
@@ -169,19 +207,26 @@ fn build_git_url(repository: &str, region: &str, creds: &Credentials) -> String 
         None => creds.access_key_id().to_string(),
     };
 
-    let username = urlencoding::encode(&username_raw);
+    let username = percent_encode(&username_raw);
     let signature = generate_signature(&hostname, &path, region, creds);
 
     format!("https://{username}:{signature}@{hostname}{path}")
 }
 
-#[tokio::main(flavor = "current_thread")]
-/// Entrypoint for the git credential helper.
+fn main() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|e| error_exit(&format!("Failed to start async runtime: {e}")))
+        .block_on(run());
+}
+
+/// Resolves credentials and delegates to `git remote-http`.
 /// - Parses the `codecommit://` URL
 /// - Resolves AWS credentials
 /// - Builds the signed remote URL
 /// - Defers the actual git operation to `git remote-http`
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
         error_exit("Too few arguments. This hook requires the git command and remote.");
@@ -193,7 +238,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
     }
 
-    let git_cmd = &args[1];
+    let remote_name = &args[1];
     let remote_url = &args[2];
 
     // Parse remote_url (format: codecommit://[profile@]repository or codecommit::region://[profile@]repository)
@@ -236,34 +281,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         profile = user.to_string();
     }
 
-    // Determine region: if scheme is a valid region, use it; otherwise use default
-    let region = if is_region_available(&scheme) {
-        scheme
+    // Explicit region from the scheme (codecommit::region://). Plain `codecommit://`
+    // leaves this as None so the AWS SDK default chain decides.
+    let explicit_region = if is_region_available(&scheme) {
+        Some(scheme)
     } else if scheme == "codecommit" {
-        // No explicit region specified; use fallback.
-        // AWS SDK's default resolution is checked later and can override this if configured.
-        "us-east-1".to_string()
+        None
     } else {
         error_exit(&format!(
             "The following AWS Region is not available for use with AWS CodeCommit: {scheme}.\n\
             \n\
-            Available regions: af-south-1, ap-east-1, ap-northeast-1, ap-northeast-2, ap-northeast-3, \
-            ap-south-1, ap-south-2, ap-southeast-1, ap-southeast-2, ap-southeast-3, ca-central-1, \
-            cn-north-1, cn-northwest-1, eu-central-1, eu-north-1, eu-south-1, eu-west-1, eu-west-2, \
-            eu-west-3, eusc-de-east-1, il-central-1, me-central-1, me-south-1, sa-east-1, us-east-1, \
-            us-east-2, us-gov-east-1, us-gov-west-1, us-west-1, us-west-2"
+            Available regions: {}",
+            KNOWN_REGIONS.join(", ")
         ))
     };
 
-    // Load AWS config
-    let mut config_builder =
-        aws_config::defaults(BehaviorVersion::latest()).region(Region::new(region.to_string()));
+    // Load AWS config. Only set the region on the builder when the URL provides one,
+    // otherwise an explicit builder region would override AWS_REGION and the profile.
+    let mut config_builder = aws_config::defaults(BehaviorVersion::latest());
+    if let Some(r) = &explicit_region {
+        config_builder = config_builder.region(Region::new(r.clone()));
+    }
 
     if profile != "default" {
         config_builder = config_builder.profile_name(&profile);
     }
 
     let config = config_builder.load().await;
+
+    // Resolve region: explicit URL region > SDK chain (AWS_REGION, profile) > us-east-1
+    let region = match explicit_region {
+        Some(r) => r,
+        None => match config.region() {
+            Some(r) => {
+                let name = r.to_string();
+                if !is_region_available(&name) {
+                    error_exit(&format!(
+                        "The AWS Region configured for this profile is not available for use with AWS CodeCommit: {name}.\n\
+                        \n\
+                        Set an explicit region in the URL, e.g. codecommit::us-east-1://{profile}@{repository}"
+                    ));
+                }
+                name
+            }
+            None => "us-east-1".to_string(),
+        },
+    };
 
     // Get credentials from the config
     let credentials_provider = config.credentials_provider().unwrap_or_else(|| {
@@ -283,10 +346,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let credentials = match credential_result {
         Ok(creds) => creds,
         Err(e) => {
+            // Collect the whole error chain: the top-level message and its sources
+            // may each carry the cause (e.g. expired SSO token, missing profile).
+            let mut error_str = e.to_string();
+            let mut next = e.source();
+            while let Some(source) = next {
+                error_str.push_str(" | ");
+                error_str.push_str(&source.to_string());
+                next = source.source();
+            }
+
             // Check for specific error types and provide human-readable messages
-            let error_msg = if let Some(source) = e.source() {
-                let error_str = source.to_string();
-                if error_str.contains("Session token not found or invalid") {
+            let error_msg = {
+                if error_str.contains("Session token not found or invalid")
+                    || error_str.contains("SSO token has expired")
+                    || error_str.contains("SSO session")
+                    || error_str.contains("sso session")
+                {
                     format!(
                         "AWS authentication failed: Your session token is invalid or has expired.\n\
                         \n\
@@ -333,12 +409,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         profile, error_str, profile, profile
                     )
                 }
-            } else {
-                format!(
-                    "Failed to load AWS credentials for profile '{profile}'.\n\
-                    \n\
-                    Please ensure your AWS credentials are properly configured."
-                )
             };
 
             error_exit(&error_msg)
@@ -350,7 +420,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Execute git remote-http with the authenticated URL
     let status = Command::new("git")
         .arg("remote-http")
-        .arg(git_cmd)
+        .arg(remote_name)
         .arg(&authenticated_url)
         .status()
         .unwrap_or_else(|e| {
@@ -366,6 +436,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !status.success() {
         exit(status.code().unwrap_or(1));
     }
+}
 
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn amz_timestamp_matches_known_epochs() {
+        assert_eq!(amz_timestamp(UNIX_EPOCH), "19700101T000000");
+        // 2000-02-29 (leap day) at 00:00:00 UTC
+        assert_eq!(
+            amz_timestamp(UNIX_EPOCH + Duration::from_secs(951_782_400)),
+            "20000229T000000"
+        );
+        // 2023-11-14 22:13:20 UTC
+        assert_eq!(
+            amz_timestamp(UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+            "20231114T221320"
+        );
+    }
+
+    #[test]
+    fn percent_encode_matches_urlencoding_rules() {
+        assert_eq!(percent_encode("AKIA_x-1.~"), "AKIA_x-1.~");
+        assert_eq!(percent_encode("a%b/c+d"), "a%25b%2Fc%2Bd");
+    }
+
+    #[test]
+    fn hex_encode_is_lowercase() {
+        assert_eq!(hex_encode(&[0x00, 0xab, 0xff]), "00abff");
+    }
 }

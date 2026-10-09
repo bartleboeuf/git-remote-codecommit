@@ -26,7 +26,7 @@ This Git remote helper enables pushing and pulling from AWS CodeCommit repositor
 
 - **Git** 2.0 or newer
 - **AWS credentials** configured (see [Configuration](#configuration) section)
-- **Rust 1.93.0+** (for local builds; install from [rustup.rs](https://rustup.rs))
+- **Rust 1.99.0+** (for local builds; install from [rustup.rs](https://rustup.rs))
 - **Docker** (optional, for cross-platform builds)
 
 **Supported platforms:**
@@ -87,7 +87,7 @@ cd my-repo
 ### Clone a Repository
 
 ```bash
-# Using default AWS profile (falls back to us-east-1 region)
+# Using default AWS profile (region from AWS_REGION or the profile, falls back to us-east-1)
 git clone codecommit://repository-name
 
 # Using a specific AWS profile
@@ -114,6 +114,16 @@ The helper uses AWS credentials in this order:
 2. **AWS credentials file**: `~/.aws/credentials`
 3. **AWS configuration file**: `~/.aws/config`
 4. **AWS SSO profiles**: Via `aws sso login --profile <name>`
+
+### Region Resolution
+
+The region is chosen in this order:
+
+1. **Region in the URL**: `codecommit::us-west-2://...` always wins. It must be one of the supported CodeCommit regions.
+2. **SDK default chain**: `AWS_REGION`, then the region set for the profile in `~/.aws/config`.
+3. **Fallback**: `us-east-1`.
+
+A region from the profile that is not a supported CodeCommit region is rejected with an error.
 
 ### Setting Up AWS Credentials
 
@@ -206,7 +216,7 @@ Please configure your AWS credentials using one of:
 ### Building from Source
 
 **Prerequisites:**
-- Rust 1.93.0+ (MSRV)
+- Rust 1.99.0+ (MSRV)
 
 **Build with quality checks (required for releases):**
 ```bash

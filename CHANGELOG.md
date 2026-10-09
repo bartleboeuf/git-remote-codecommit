@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.3.2
+- fix plain `codecommit://` URLs forcing `us-east-1`; the region now comes from `AWS_REGION` or the profile, with `us-east-1` as fallback
+- reject a profile region that is not a supported CodeCommit region, with a clear error
+- detect expired SSO sessions from the full error chain and suggest `aws sso login --profile <name>`
+- list available regions from the known-regions table, so the message can't drift
+- rename the first argument to `remote_name` (Git passes the remote name, not the command)
+- replace `chrono`, `hex`, `urlencoding`, and `aws-types` with small local helpers and re-exports from `aws-config`
+- use an explicit single-threaded Tokio runtime instead of `#[tokio::main]`, reducing Tokio features to `rt`
+- add unit tests for timestamp formatting, percent-encoding, and hex encoding
+
 ## v1.3.1
 - update dependencies and raise minimum Rust toolchain to `1.96.0`
 - update build workflow

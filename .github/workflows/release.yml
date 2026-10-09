@@ -15,10 +15,10 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04
             name: linux-x86_64
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04
             name: linux-aarch64
             use_cross: true
           - target: x86_64-apple-darwin
@@ -36,7 +36,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -54,7 +54,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Free up disk space
-        if: matrix.os == 'ubuntu-latest'
+        if: startsWith(matrix.os, 'ubuntu-')
         run: |
           df -h
           sudo apt-get clean -y
@@ -62,7 +62,7 @@ jobs:
           df -h
 
       - name: Build binary (Linux)
-        if: matrix.os == 'ubuntu-latest' && matrix.use_cross != true
+        if: startsWith(matrix.os, 'ubuntu-') && matrix.use_cross != true
         run: cargo build --release --target ${{ matrix.target }} -j 3
         env:
           CARGO_BUILD_JOBS: 3
@@ -81,7 +81,7 @@ jobs:
           CARGO_BUILD_JOBS: 3
 
       - name: Set up swap for ARM builds
-        if: matrix.use_cross == true && matrix.os == 'ubuntu-latest'
+        if: matrix.use_cross == true && startsWith(matrix.os, 'ubuntu-')
         run: |
           # Disable existing swap if present
           sudo swapoff /swapfile 2>/dev/null || true
@@ -154,7 +154,7 @@ jobs:
 
   create-release:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -168,7 +168,7 @@ jobs:
           find ./release-assets -type f -exec mv {} ./flat-assets/ \;
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           files: ./flat-assets/*
           fail_on_unmatched_files: false

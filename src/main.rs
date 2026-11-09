@@ -3,7 +3,7 @@
 use aws_config::{BehaviorVersion, Region};
 use aws_credential_types::Credentials;
 use aws_credential_types::provider::ProvideCredentials;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use std::env;
 use std::error::Error;
@@ -136,6 +136,17 @@ fn hmac_sha256(key: &[u8], input: &[u8]) -> [u8; 32] {
     out
 }
 
+/// Builds the canonical request for a CodeCommit Git operation.
+fn canonical_request(hostname: &str, path: &str) -> String {
+    let mut request = String::with_capacity(path.len() + hostname.len() + 16);
+    request.push_str("GIT\n");
+    request.push_str(path);
+    request.push_str("\n\nhost:");
+    request.push_str(hostname);
+    request.push_str("\n\nhost\n");
+    request
+}
+
 /// Builds the signed `username:password` fragment needed by `git remote-http`.
 /// Implements AWS Signature Version 4 (AWS SigV4) signing process:
 /// 1. Create canonical request with GIT verb
@@ -145,15 +156,21 @@ fn hmac_sha256(key: &[u8], input: &[u8]) -> [u8; 32] {
 /// 5. Sign the string to produce final signature
 fn generate_signature(hostname: &str, path: &str, region: &str, creds: &Credentials) -> String {
     let timestamp = amz_timestamp(SystemTime::now());
+    generate_signature_at(hostname, path, region, creds, &timestamp)
+}
+
+/// Generates a SigV4 signature for a fixed timestamp, enabling deterministic tests.
+fn generate_signature_at(
+    hostname: &str,
+    path: &str,
+    region: &str,
+    creds: &Credentials,
+    timestamp: &str,
+) -> String {
     let datestamp = &timestamp[..8];
 
     // Step 1: Build canonical request (GIT verb for CodeCommit)
-    let mut canonical_request = String::with_capacity(path.len() + hostname.len() + 16);
-    canonical_request.push_str("GIT\n"); // HTTP verb for AWS CodeCommit signing
-    canonical_request.push_str(path);
-    canonical_request.push_str("\n\nhost:");
-    canonical_request.push_str(hostname);
-    canonical_request.push_str("\n\nhost\n");
+    let canonical_request = canonical_request(hostname, path);
 
     // Step 2: Hash canonical request
     let canonical_request_hash_hex = hex_encode(&hash_sha256(canonical_request.as_bytes()));
@@ -166,7 +183,7 @@ fn generate_signature(hostname: &str, path: &str, region: &str, creds: &Credenti
         32 + timestamp.len() + credential_scope.len() + canonical_request_hash_hex.len(),
     );
     string_to_sign.push_str("AWS4-HMAC-SHA256\n");
-    string_to_sign.push_str(&timestamp);
+    string_to_sign.push_str(timestamp);
     string_to_sign.push('\n');
     string_to_sign.push_str(&credential_scope);
     string_to_sign.push('\n');
@@ -191,15 +208,12 @@ fn generate_signature(hostname: &str, path: &str, region: &str, creds: &Credenti
 }
 
 /// Constructs the HTTPS URL that contains credentials recognized by `git remote-http`.
-/// The placeholder `CODE_COMMIT_ENDPOINT` env var allows overriding the AWS endpoint for testing.
 fn build_git_url(repository: &str, region: &str, creds: &Credentials) -> String {
-    let hostname = env::var("CODE_COMMIT_ENDPOINT").unwrap_or_else(|_| {
-        format!(
-            "git-codecommit.{}.{}",
-            region,
-            website_domain_mapping(region)
-        )
-    });
+    let hostname = format!(
+        "git-codecommit.{}.{}",
+        region,
+        website_domain_mapping(region)
+    );
 
     let path = format!("/v1/repos/{repository}");
     let username_raw = match creds.session_token() {
@@ -467,5 +481,38 @@ mod tests {
     #[test]
     fn hex_encode_is_lowercase() {
         assert_eq!(hex_encode(&[0x00, 0xab, 0xff]), "00abff");
+    }
+
+    #[test]
+    fn canonical_request_matches_expected_codecommit_request() {
+        assert_eq!(
+            canonical_request(
+                "git-codecommit.us-east-1.amazonaws.com",
+                "/v1/repos/MyDemoRepo"
+            ),
+            "GIT\n/v1/repos/MyDemoRepo\n\nhost:git-codecommit.us-east-1.amazonaws.com\n\nhost\n"
+        );
+    }
+
+    #[test]
+    fn signature_matches_fixed_sigv4_vector() {
+        let creds = Credentials::new(
+            "AKIDEXAMPLE",
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            None,
+            None,
+            "test",
+        );
+
+        assert_eq!(
+            generate_signature_at(
+                "git-codecommit.us-east-1.amazonaws.com",
+                "/v1/repos/MyDemoRepo",
+                "us-east-1",
+                &creds,
+                "20150830T123600"
+            ),
+            "20150830T123600Z088fec8c788f892e6cb940f22a736b224a5a5de18925fa5f02413a1bb215c389"
+        );
     }
 }

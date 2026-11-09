@@ -6,11 +6,12 @@ name: Release
       - v*
 
 permissions:
-  contents: write
-  packages: write
+  contents: none
 
 jobs:
   build:
+    permissions:
+      contents: read
     strategy:
       matrix:
         include:
@@ -141,7 +142,7 @@ jobs:
 
       - name: Generate checksum for asset
         shell: bash
-        run: sha256sum ${{ steps.archive.outputs.archive_name }} >> checksums.txt
+        run: sha256sum ${{ steps.archive.outputs.archive_name }} > checksums-${{ matrix.name }}.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -149,12 +150,14 @@ jobs:
           name: ${{ matrix.name }}-${{ github.ref_name }}
           path: |
             ${{ steps.archive.outputs.archive_name }}
-            checksums.txt
+            checksums-${{ matrix.name }}.txt
           retention-days: 1
 
   create-release:
     needs: build
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -165,7 +168,10 @@ jobs:
         shell: bash
         run: |
           mkdir -p ./flat-assets
-          find ./release-assets -type f -exec mv {} ./flat-assets/ \;
+          find ./release-assets -type f \( -name '*.tar.gz' -o -name '*.zip' \) | while IFS= read -r file; do
+            mv "$file" ./flat-assets/
+          done
+          find ./release-assets -type f -name 'checksums-*.txt' -exec mv {} ./flat-assets/ \\;
 
       - name: Create Release
         uses: softprops/action-gh-release@v3

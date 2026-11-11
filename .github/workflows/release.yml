@@ -168,10 +168,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p ./flat-assets
-          find ./release-assets -type f \( -name '*.tar.gz' -o -name '*.zip' \) | while IFS= read -r file; do
+          while IFS= read -r -d '' file; do
             mv "$file" ./flat-assets/
-          done
-          find ./release-assets -type f -name 'checksums-*.txt' -exec mv {} ./flat-assets/ \\;
+          done < <(find ./release-assets -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name 'checksums-*.txt' \) -print0)
 
       - name: Create Release
         uses: softprops/action-gh-release@v3
